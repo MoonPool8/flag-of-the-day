@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Flag of the Day</title>
+  <title>flag of the day</title>
   <style>
     body {
       font-family: sans-serif;
@@ -70,12 +70,36 @@
   </style>
 </head>
 <body>
-  <h1>Flag of the Day</h1>
+  <h1>flag of the day</h1>
   <div id="count"></div>
-  <input type="text" id="search" placeholder="Search…" autocomplete="off"/>
+  <input type="text" id="search" placeholder="search…" autocomplete="off"/>
   <div id="list"></div>
 
   <script>
+    async function setFaviconFromWikimedia(pageUrl) {
+      try {
+        const match = pageUrl.match(/\/wiki\/(File:[^#?]+)/);
+        if (!match) return;
+        const title = decodeURIComponent(match[1]);
+
+        const api = `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=imageinfo&iiprop=url&format=json&origin=*`;
+        const res = await fetch(api);
+        const data = await res.json();
+
+        const pages = data.query.pages;
+        const page = pages[Object.keys(pages)[0]];
+        const imageUrl = page?.imageinfo?.[0]?.url;
+        if (!imageUrl) return;
+
+        const link = document.createElement('link');
+        link.rel = 'icon';
+        link.href = imageUrl;
+        document.head.appendChild(link);
+      } catch (e) {
+        // Silently fail — no favicon is fine
+      }
+    }
+
     (async () => {
       const res = await fetch('FOTD.html');
       const html = await res.text();
@@ -83,6 +107,7 @@
       const rows = [...doc.querySelectorAll('tr')];
       const list = document.getElementById('list');
       let count = 0;
+      let lastUrl = null;
 
       rows.forEach(row => {
         const cells = row.querySelectorAll('td');
@@ -93,7 +118,9 @@
         const mainLink = cells[1]?.querySelector('a');
         if (!mainLink) return;
 
+        const mainHref = mainLink.getAttribute('href');
         const altLink = cells[2]?.querySelector('a');
+        const altHref = altLink?.getAttribute('href');
 
         const div = document.createElement('div');
         div.className = 'row';
@@ -102,15 +129,20 @@
 
         div.innerHTML = `
           <span class="day">${dayText.replace('Day ', '#')}</span>
-          <a href="${mainLink.href}" target="_blank">${mainLink.textContent}</a>
-          ${altLink ? `<span class="alt">— <a href="${altLink.href}" target="_blank">alt</a></span>` : ''}
+          <a href="${mainHref}" target="_blank">${mainLink.textContent}</a>
+          ${altHref ? `<span class="alt">— <a href="${altHref}" target="_blank">alt</a></span>` : ''}
         `;
 
         list.appendChild(div);
+        lastUrl = mainHref;
         count++;
       });
 
-      document.getElementById('count').textContent = `${count} flags`;
+      document.getElementById('count').textContent = `${count} flags. ${count} days.`;
+
+      if (lastUrl && lastUrl.includes('wikimedia.org')) {
+        setFaviconFromWikimedia(lastUrl);
+      }
 
       document.getElementById('search').addEventListener('input', e => {
         const q = e.target.value.toLowerCase();
