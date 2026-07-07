@@ -39,7 +39,7 @@
 
     .row {
       display: flex;
-      align-items: baseline;
+      align-items: center;
       gap: 12px;
       padding: 8px 0;
       border-bottom: 1px solid #f0f0f0;
@@ -51,6 +51,15 @@
       color: #aaa;
       font-size: 12px;
       min-width: 48px;
+    }
+
+    .flag-thumb {
+      width: 28px;
+      height: 20px;
+      object-fit: cover;
+      border: 1px solid #eee;
+      flex-shrink: 0;
+      background: #f7f7f7;
     }
 
     .row a {
@@ -76,19 +85,31 @@
   <div id="list"></div>
 
   <script>
-    async function setFaviconFromWikimedia(pageUrl) {
+    // Look up the direct (thumbnail) image URL for a Wikimedia Commons
+    // file-page URL, e.g. https://commons.wikimedia.org/wiki/File:Foo.svg
+    async function getWikimediaThumbUrl(pageUrl, width = 60) {
       try {
         const match = pageUrl.match(/\/wiki\/(File:[^#?]+)/);
-        if (!match) return;
+        if (!match) return null;
         const title = decodeURIComponent(match[1]);
 
-        const api = `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=imageinfo&iiprop=url&format=json&origin=*`;
+        const api = `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=imageinfo&iiprop=url&iiurlwidth=${width}&format=json&origin=*`;
         const res = await fetch(api);
         const data = await res.json();
 
         const pages = data.query.pages;
         const page = pages[Object.keys(pages)[0]];
-        const imageUrl = page?.imageinfo?.[0]?.url;
+        const info = page?.imageinfo?.[0];
+        // Prefer the generated thumbnail; fall back to the full image.
+        return info?.thumburl || info?.url || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function setFaviconFromWikimedia(pageUrl) {
+      try {
+        const imageUrl = await getWikimediaThumbUrl(pageUrl, 64);
         if (!imageUrl) return;
 
         const link = document.createElement('link');
@@ -130,10 +151,22 @@
         div.innerHTML = `
           <span class="day">${dayText.replace('Day ', '#')}</span>
           <a href="${mainHref}" target="_blank">${mainLink.textContent}</a>
+          <img class="flag-thumb" alt="" loading="lazy" />
           ${altHref ? `<span class="alt">— <a href="${altHref}" target="_blank">alt</a></span>` : ''}
         `;
 
         list.appendChild(div);
+
+        // Fill in the thumbnail once we've looked up its real URL.
+        const thumbEl = div.querySelector('.flag-thumb');
+        getWikimediaThumbUrl(mainHref, 60).then(url => {
+          if (url) {
+            thumbEl.src = url;
+          } else {
+            thumbEl.remove();
+          }
+        });
+
         lastUrl = mainHref;
         count++;
       });
