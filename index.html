@@ -85,23 +85,90 @@
   <div id="list"></div>
 
   <script>
-    // Look up the direct (thumbnail) image URL for a Wikimedia Commons
-    // file-page URL, e.g. https://commons.wikimedia.org/wiki/File:Foo.svg
-    async function getWikimediaThumbUrl(pageUrl, width = 60) {
+    // Query a single MediaWiki-style API endpoint for a title.
+    // isFile=true looks up the file itself (imageinfo); otherwise looks up
+    // the page's lead/infobox image (pageimages).
+    async function tryMediaWikiApi(apiBase, title, isFile, width) {
       try {
-        const match = pageUrl.match(/\/wiki\/(File:[^#?]+)/);
-        if (!match) return null;
-        const title = decodeURIComponent(match[1]);
-
-        const api = `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=imageinfo&iiprop=url&iiurlwidth=${width}&format=json&origin=*`;
-        const res = await fetch(api);
+        const params = isFile
+          ? `prop=imageinfo&iiprop=url&iiurlwidth=${width}`
+          : `prop=pageimages&piprop=thumbnail&pithumbsize=${width}`;
+        const endpoint = `${apiBase}?action=query&redirects=1&titles=${encodeURIComponent(title)}&${params}&format=json&origin=*`;
+        const res = await fetch(endpoint);
+        if (!res.ok) return null;
         const data = await res.json();
-
-        const pages = data.query.pages;
+        const pages = data.query && data.query.pages;
+        if (!pages) return null;
         const page = pages[Object.keys(pages)[0]];
-        const info = page?.imageinfo?.[0];
-        // Prefer the generated thumbnail; fall back to the full image.
-        return info?.thumburl || info?.url || null;
+        if (!page || page.missing !== undefined) return null;
+        if (isFile) {
+          const info = page.imageinfo && page.imageinfo[0];
+          return (info && (info.thumburl || info.url)) || null;
+        }
+        return (page.thumbnail && page.thumbnail.source) || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // Look up a usable thumbnail/image URL for a flag link. Links in the
+    // data point to Wikimedia Commons, English Wikipedia, various Fandom
+    // wikis, other self-hosted MediaWiki sites, and Google Drive share
+    // links — this tries each source's own API rather than assuming Commons.
+    async function getFlagImageUrl(pageUrl, width = 60) {
+      try {
+        const url = new URL(pageUrl);
+
+        // Google Drive share links: https://drive.google.com/file/d/<ID>/view...
+        if (url.hostname.includes('drive.google.com')) {
+          const m = pageUrl.match(/\/file\/d\/([^/]+)/);
+          return m ? `https://drive.google.com/thumbnail?id=${m[1]}&sz=w${width}` : null;
+        }
+
+        // Generic MediaWiki-style link: https://<host>/wiki/<Title>
+        const wikiMatch = pageUrl.match(/\/wiki\/([^#?]+)/);
+        if (wikiMatch) {
+          let title = decodeURIComponent(wikiMatch[1]);
+
+          // Some Fandom links point at an article with a `?file=` query
+          // param instead of the File: page itself, e.g.
+          // https://gender.fandom.com/wiki/Genderfaun?file=Foo.jpeg
+          const fileParam = url.searchParams.get('file');
+          if (fileParam) title = 'File:' + fileParam;
+
+          const isFile = /^File:/i.test(title);
+          const host = url.hostname;
+
+          const apiCandidates = [];
+          if (/wikimedia\.org$/.test(host) || /wikipedia\.org$/.test(host)) {
+            apiCandidates.push(`${url.protocol}//${host.replace(/^commons\.m\./, 'commons.')}/w/api.php`);
+          } else if (/fandom\.com$/.test(host)) {
+            apiCandidates.push(`${url.protocol}//${host}/api.php`);
+          } else {
+            // Unknown wiki software — try both common endpoint locations.
+            apiCandidates.push(`${url.protocol}//${host}/w/api.php`);
+            apiCandidates.push(`${url.protocol}//${host}/api.php`);
+          }
+
+          for (const api of apiCandidates) {
+            const result = await tryMediaWikiApi(api, title, isFile, width);
+            if (result) return result;
+          }
+
+          // Flag files are often uploaded straight to Commons even when
+          // linked from a non-Commons wiki page — try that as a last resort.
+          if (isFile && !/wikimedia\.org$/.test(host)) {
+            const result = await tryMediaWikiApi('https://commons.wikimedia.org/w/api.php', title, true, width);
+            if (result) return result;
+          }
+        }
+
+        // Fallback: the link itself points straight at an image file.
+        if (/\.(png|jpe?g|gif|svg|webp)$/i.test(url.pathname)) {
+          return pageUrl;
+        }
+
+        return null;
       } catch (e) {
         return null;
       }
@@ -109,7 +176,7 @@
 
     async function setFaviconFromWikimedia(pageUrl) {
       try {
-        const imageUrl = await getWikimediaThumbUrl(pageUrl, 64);
+        const imageUrl = await getFlagImageUrl(pageUrl, 64);
         if (!imageUrl) return;
 
         const link = document.createElement('link');
@@ -159,7 +226,8 @@
 
         // Fill in the thumbnail once we've looked up its real URL.
         const thumbEl = div.querySelector('.flag-thumb');
-        getWikimediaThumbUrl(mainHref, 60).then(url => {
+        thumbEl.addEventListener('error', () => thumbEl.remove());
+        getFlagImageUrl(mainHref, 60).then(url => {
           if (url) {
             thumbEl.src = url;
           } else {
