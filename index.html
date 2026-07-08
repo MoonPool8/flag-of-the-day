@@ -85,117 +85,88 @@
   <div id="list"></div>
 
   <script>
-    // Query a single MediaWiki-style API endpoint for a title.
-    // isFile=true looks up the file itself (imageinfo); otherwise looks up
-    // the page's lead/infobox image (pageimages).
-    async function tryMediaWikiApi(apiBase, title, isFile, width) {
-      try {
+    // fetch() with a couple of retries — smooths over transient network hiccups
+    // rather than treating a single failed request as "no image".
+    async function fetchWithRetry(url, retries = 2, delayMs = 400) {
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const res = await fetch(url);
+          if (res.ok) return res;
+        } catch (e) {
+          // fall through to retry
+        }
+        if (attempt < retries) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
+      }
+      return null;
+    }
+
+    // Resolve MANY titles against a single MediaWiki API endpoint in one
+    // request (chunked at 50 titles, the anonymous API limit), instead of
+    // firing one fetch per flag. This is both faster and far more reliable —
+    // hundreds of simultaneous individual requests get throttled/dropped by
+    // Wikimedia/Fandom, which is what was causing icons to load
+    // inconsistently between refreshes.
+    async function batchResolveTitles(apiBase, titles, isFile, width) {
+      const results = new Map(); // title -> url|null
+      const chunkSize = 50;
+
+      for (let i = 0; i < titles.length; i += chunkSize) {
+        const chunk = titles.slice(i, i + chunkSize);
         const params = isFile
           ? `prop=imageinfo&iiprop=url&iiurlwidth=${width}`
           : `prop=pageimages&piprop=thumbnail&pithumbsize=${width}`;
-        const endpoint = `${apiBase}?action=query&redirects=1&titles=${encodeURIComponent(title)}&${params}&format=json&origin=*`;
-        const res = await fetch(endpoint);
-        if (!res.ok) return null;
-        const data = await res.json();
-        const pages = data.query && data.query.pages;
-        if (!pages) return null;
-        const page = pages[Object.keys(pages)[0]];
-        if (!page || page.missing !== undefined) return null;
-        if (isFile) {
-          const info = page.imageinfo && page.imageinfo[0];
-          return (info && (info.thumburl || info.url)) || null;
-        }
-        return (page.thumbnail && page.thumbnail.source) || null;
-      } catch (e) {
-        return null;
-      }
-    }
+        const endpoint = `${apiBase}?action=query&redirects=1&titles=${encodeURIComponent(chunk.join('|'))}&${params}&format=json&origin=*`;
 
-    // Look up a usable thumbnail/image URL for a flag link. Links in the
-    // data point to Wikimedia Commons, English Wikipedia, various Fandom
-    // wikis, other self-hosted MediaWiki sites, and Google Drive share
-    // links — this tries each source's own API rather than assuming Commons.
-    async function getFlagImageUrl(pageUrl, width = 60) {
-      try {
-        const url = new URL(pageUrl);
+        const res = await fetchWithRetry(endpoint);
+        if (!res) { chunk.forEach(t => results.set(t, null)); continue; }
 
-        // Google Drive share links: https://drive.google.com/file/d/<ID>/view...
-        if (url.hostname.includes('drive.google.com')) {
-          const m = pageUrl.match(/\/file\/d\/([^/]+)/);
-          return m ? `https://drive.google.com/thumbnail?id=${m[1]}&sz=w${width}` : null;
-        }
-
-        // Generic MediaWiki-style link: https://<host>/wiki/<Title>
-        const wikiMatch = pageUrl.match(/\/wiki\/([^#?]+)/);
-        if (wikiMatch) {
-          let title = decodeURIComponent(wikiMatch[1]);
-
-          // Some Fandom links point at an article with a `?file=` query
-          // param instead of the File: page itself, e.g.
-          // https://gender.fandom.com/wiki/Genderfaun?file=Foo.jpeg
-          const fileParam = url.searchParams.get('file');
-          if (fileParam) title = 'File:' + fileParam;
-
-          const isFile = /^File:/i.test(title);
-          const host = url.hostname;
-
-          const apiCandidates = [];
-          if (/wikimedia\.org$/.test(host) || /wikipedia\.org$/.test(host)) {
-            apiCandidates.push(`${url.protocol}//${host.replace(/^commons\.m\./, 'commons.')}/w/api.php`);
-          } else if (/fandom\.com$/.test(host)) {
-            apiCandidates.push(`${url.protocol}//${host}/api.php`);
-          } else {
-            // Unknown wiki software — try both common endpoint locations.
-            apiCandidates.push(`${url.protocol}//${host}/w/api.php`);
-            apiCandidates.push(`${url.protocol}//${host}/api.php`);
+        try {
+          const data = await res.json();
+          const q = data.query || {};
+          const pagesByTitle = {};
+          for (const pid in (q.pages || {})) {
+            pagesByTitle[q.pages[pid].title] = q.pages[pid];
           }
+          // A title can be renamed via normalization and/or a redirect
+          // before landing on its final page entry — follow both chains.
+          const resolveFinalTitle = (t) => {
+            let cur = t;
+            const norm = (q.normalized || []).find(x => x.from === cur);
+            if (norm) cur = norm.to;
+            const redir = (q.redirects || []).find(x => x.from === cur);
+            if (redir) cur = redir.to;
+            return cur;
+          };
 
-          for (const api of apiCandidates) {
-            const result = await tryMediaWikiApi(api, title, isFile, width);
-            if (result) return result;
-          }
-
-          // Flag files are often uploaded straight to Commons even when
-          // linked from a non-Commons wiki page — try that as a last resort.
-          if (isFile && !/wikimedia\.org$/.test(host)) {
-            const result = await tryMediaWikiApi('https://commons.wikimedia.org/w/api.php', title, true, width);
-            if (result) return result;
-          }
+          chunk.forEach(t => {
+            const page = pagesByTitle[resolveFinalTitle(t)];
+            if (!page || page.missing !== undefined) { results.set(t, null); return; }
+            if (isFile) {
+              const info = page.imageinfo && page.imageinfo[0];
+              results.set(t, (info && (info.thumburl || info.url)) || null);
+            } else {
+              results.set(t, (page.thumbnail && page.thumbnail.source) || null);
+            }
+          });
+        } catch (e) {
+          chunk.forEach(t => results.set(t, null));
         }
-
-        // Fallback: the link itself points straight at an image file.
-        if (/\.(png|jpe?g|gif|svg|webp)$/i.test(url.pathname)) {
-          return pageUrl;
-        }
-
-        return null;
-      } catch (e) {
-        return null;
       }
-    }
 
-    async function setFaviconFromWikimedia(pageUrl) {
-      try {
-        const imageUrl = await getFlagImageUrl(pageUrl, 64);
-        if (!imageUrl) return;
-
-        const link = document.createElement('link');
-        link.rel = 'icon';
-        link.href = imageUrl;
-        document.head.appendChild(link);
-      } catch (e) {
-        // Silently fail — no favicon is fine
-      }
+      return results;
     }
 
     (async () => {
-      const res = await fetch('FOTD.html');
-      const html = await res.text();
+      const listRes = await fetchWithRetry('FOTD.html');
+      const html = listRes ? await listRes.text() : '';
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const rows = [...doc.querySelectorAll('tr')];
       const list = document.getElementById('list');
       let count = 0;
-      let lastUrl = null;
+
+      // First pass: render every row (with an empty thumbnail placeholder)
+      // and classify its flag link so we know how to resolve it.
+      const descriptors = []; // { thumbEl, mainHref }
 
       rows.forEach(row => {
         const cells = row.querySelectorAll('td');
@@ -224,25 +195,122 @@
 
         list.appendChild(div);
 
-        // Fill in the thumbnail once we've looked up its real URL.
         const thumbEl = div.querySelector('.flag-thumb');
         thumbEl.addEventListener('error', () => thumbEl.remove());
-        getFlagImageUrl(mainHref, 60).then(url => {
-          if (url) {
-            thumbEl.src = url;
-          } else {
-            thumbEl.remove();
-          }
-        });
 
-        lastUrl = mainHref;
+        descriptors.push({ thumbEl, mainHref });
         count++;
       });
 
       document.getElementById('count').textContent = `${count} flags. ${count} days.`;
 
-      if (lastUrl && lastUrl.includes('wikimedia.org')) {
-        setFaviconFromWikimedia(lastUrl);
+      // Second pass: classify each link and group the MediaWiki ones by
+      // (api endpoint, isFile) so each group can be resolved in one batch.
+      const groups = new Map(); // key -> { apiBase, isFile, rowsByTitle: Map(title -> descriptor[]) }
+      const commonsFallbackTitles = new Map(); // title -> descriptor[]
+      let lastResolvable = null; // descriptor whose image we'll reuse for the favicon
+
+      for (const d of descriptors) {
+        let url;
+        try { url = new URL(d.mainHref); } catch (e) { d.thumbEl.remove(); continue; }
+
+        // Google Drive share links don't need an API call at all.
+        if (url.hostname.includes('drive.google.com')) {
+          const m = d.mainHref.match(/\/file\/d\/([^/]+)/);
+          if (m) {
+            d.thumbEl.src = `https://drive.google.com/thumbnail?id=${m[1]}&sz=w60`;
+            lastResolvable = d;
+          } else {
+            d.thumbEl.remove();
+          }
+          continue;
+        }
+
+        const wikiMatch = d.mainHref.match(/\/wiki\/([^#?]+)/);
+        if (wikiMatch) {
+          let title = decodeURIComponent(wikiMatch[1]);
+
+          // Some Fandom links point at an article with a `?file=` query
+          // param instead of the File: page itself.
+          const fileParam = url.searchParams.get('file');
+          if (fileParam) title = 'File:' + fileParam;
+
+          const isFile = /^File:/i.test(title);
+          const host = url.hostname;
+
+          let apiBase;
+          if (/wikimedia\.org$/.test(host) || /wikipedia\.org$/.test(host)) {
+            apiBase = `${url.protocol}//${host.replace(/^commons\.m\./, 'commons.')}/w/api.php`;
+          } else if (/fandom\.com$/.test(host)) {
+            apiBase = `${url.protocol}//${host}/api.php`;
+          } else {
+            // Rare: some other self-hosted wiki. Best-effort guess.
+            apiBase = `${url.protocol}//${host}/w/api.php`;
+          }
+
+          const key = apiBase + '|' + (isFile ? 'file' : 'page');
+          if (!groups.has(key)) groups.set(key, { apiBase, isFile, rowsByTitle: new Map() });
+          const g = groups.get(key);
+          if (!g.rowsByTitle.has(title)) g.rowsByTitle.set(title, []);
+          g.rowsByTitle.get(title).push(d);
+
+          // Flags are often uploaded straight to Commons even when linked
+          // from a different wiki — queue a Commons fallback for File: links.
+          if (isFile && !/wikimedia\.org$/.test(host)) {
+            if (!commonsFallbackTitles.has(title)) commonsFallbackTitles.set(title, []);
+            commonsFallbackTitles.get(title).push(d);
+          }
+          continue;
+        }
+
+        // The link itself points straight at an image file.
+        if (/\.(png|jpe?g|gif|svg|webp)$/i.test(url.pathname)) {
+          d.thumbEl.src = d.mainHref;
+          lastResolvable = d;
+          continue;
+        }
+
+        d.thumbEl.remove();
+      }
+
+      // Resolve every group concurrently, each as a small number of batched
+      // requests instead of one request per row.
+      await Promise.all([...groups.values()].map(async g => {
+        const titles = [...g.rowsByTitle.keys()];
+        const resolved = await batchResolveTitles(g.apiBase, titles, g.isFile, 60);
+        for (const [title, descs] of g.rowsByTitle) {
+          const url = resolved.get(title);
+          if (url) {
+            descs.forEach(d => { d.thumbEl.src = url; d.resolved = true; lastResolvable = d; });
+          }
+        }
+      }));
+
+      // Fallback pass: retry any still-unresolved File: links against Commons.
+      const stillUnresolved = [...commonsFallbackTitles.keys()].filter(title =>
+        commonsFallbackTitles.get(title).some(d => !d.resolved)
+      );
+      if (stillUnresolved.length) {
+        const fb = await batchResolveTitles('https://commons.wikimedia.org/w/api.php', stillUnresolved, true, 60);
+        stillUnresolved.forEach(title => {
+          const url = fb.get(title);
+          if (!url) return;
+          commonsFallbackTitles.get(title).forEach(d => {
+            if (!d.resolved) { d.thumbEl.src = url; d.resolved = true; lastResolvable = d; }
+          });
+        });
+      }
+
+      // Clean up any rows that never got resolved.
+      descriptors.forEach(d => { if (!d.thumbEl.src) d.thumbEl.remove(); });
+
+      // Reuse the last successfully-resolved flag image as the favicon
+      // instead of making a whole separate API call for it.
+      if (lastResolvable && lastResolvable.thumbEl.src) {
+        const link = document.createElement('link');
+        link.rel = 'icon';
+        link.href = lastResolvable.thumbEl.src;
+        document.head.appendChild(link);
       }
 
       document.getElementById('search').addEventListener('input', e => {
