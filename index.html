@@ -195,10 +195,13 @@
 
         list.appendChild(div);
 
+        const dayMatch = dayText.match(/^Day (\d+)$/i);
+        const dayNum = dayMatch ? parseInt(dayMatch[1], 10) : -1;
+
         const thumbEl = div.querySelector('.flag-thumb');
         thumbEl.addEventListener('error', () => thumbEl.remove());
 
-        descriptors.push({ thumbEl, mainHref });
+        descriptors.push({ thumbEl, mainHref, dayNum });
         count++;
       });
 
@@ -208,7 +211,6 @@
       // (api endpoint, isFile) so each group can be resolved in one batch.
       const groups = new Map(); // key -> { apiBase, isFile, rowsByTitle: Map(title -> descriptor[]) }
       const commonsFallbackTitles = new Map(); // title -> descriptor[]
-      let lastResolvable = null; // descriptor whose image we'll reuse for the favicon
 
       for (const d of descriptors) {
         let url;
@@ -219,7 +221,6 @@
           const m = d.mainHref.match(/\/file\/d\/([^/]+)/);
           if (m) {
             d.thumbEl.src = `https://drive.google.com/thumbnail?id=${m[1]}&sz=w60`;
-            lastResolvable = d;
           } else {
             d.thumbEl.remove();
           }
@@ -266,7 +267,6 @@
         // The link itself points straight at an image file.
         if (/\.(png|jpe?g|gif|svg|webp)$/i.test(url.pathname)) {
           d.thumbEl.src = d.mainHref;
-          lastResolvable = d;
           continue;
         }
 
@@ -281,7 +281,7 @@
         for (const [title, descs] of g.rowsByTitle) {
           const url = resolved.get(title);
           if (url) {
-            descs.forEach(d => { d.thumbEl.src = url; d.resolved = true; lastResolvable = d; });
+            descs.forEach(d => { d.thumbEl.src = url; d.resolved = true; });
           }
         }
       }));
@@ -296,7 +296,7 @@
           const url = fb.get(title);
           if (!url) return;
           commonsFallbackTitles.get(title).forEach(d => {
-            if (!d.resolved) { d.thumbEl.src = url; d.resolved = true; lastResolvable = d; }
+            if (!d.resolved) { d.thumbEl.src = url; d.resolved = true; }
           });
         });
       }
@@ -304,12 +304,14 @@
       // Clean up any rows that never got resolved.
       descriptors.forEach(d => { if (!d.thumbEl.src) d.thumbEl.remove(); });
 
-      // Reuse the last successfully-resolved flag image as the favicon
-      // instead of making a whole separate API call for it.
-      if (lastResolvable && lastResolvable.thumbEl.src) {
+      // Favicon = the flag with the highest day number that actually
+      // resolved to an image (not just whichever happened to finish last).
+      const resolvedDescriptors = descriptors.filter(d => d.thumbEl.src);
+      if (resolvedDescriptors.length) {
+        const latest = resolvedDescriptors.reduce((max, d) => (d.dayNum > max.dayNum ? d : max), resolvedDescriptors[0]);
         const link = document.createElement('link');
         link.rel = 'icon';
-        link.href = lastResolvable.thumbEl.src;
+        link.href = latest.thumbEl.src;
         document.head.appendChild(link);
       }
 
