@@ -259,8 +259,7 @@
         }
         function saveAll(obj) { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); }
 
-        // Use similar resolution logic as the list view but for this single
-        // target: try image URL, wiki API, commons fallback.
+        // Use same batch resolution method as list view for consistency and reliability
         (async function resolveImage() {
           // direct image URL
           try {
@@ -290,6 +289,7 @@
               apiBase = `${url.protocol}//${host}/w/api.php`;
             }
 
+            // Use batch resolution with 800px width for detail view (same method as thumbnails)
             const resolved = await batchResolveTitles(apiBase, [title], isFile, 800);
             const imageUrl = resolved.get(title);
             if (imageUrl) { flagImage.src = imageUrl; return; }
