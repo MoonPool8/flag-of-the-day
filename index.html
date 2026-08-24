@@ -76,21 +76,9 @@
 
     .alt a { color: #888; font-size: 12px; }
     .alt a:hover { color: #0066cc; }
-
-    /* detail page styles */
-    .detail { max-width: 900px; margin: 20px auto; }
-    .detail .controls { margin-bottom: 12px; }
-    .btn { padding: .4rem .7rem; margin-right: .4rem; cursor: pointer; }
-    .flag-large { width: 100%; max-height: 60vh; object-fit: contain; border: 1px solid #eee; background: #fff; }
-    .desc { margin-top: 12px; }
-    .edit-area { width: 100%; min-height: 120px; font-size: 1rem; padding: .5rem; box-sizing: border-box; }
-    .small { font-size: .9rem; color: #666; margin-top: .5rem; }
   </style>
 </head>
 <body>
-  <div>
-    <h1 style="color: red;">THANKS FOR 2 YEARS OF FLAG OF THE DAY!!</h1>
-  </div>
   <h1>flag of the day</h1>
   <div id="count"></div>
   <input type="text" id="search" placeholder="search…" autocomplete="off"/>
@@ -176,178 +164,6 @@
       const list = document.getElementById('list');
       let count = 0;
 
-      // If a detail view is requested via ?flag=<encodedHref>, render a
-      // detail page inside this same file. This lets you update only index.html.
-      const flagParam = new URLSearchParams(location.search).get('flag');
-      if (flagParam) {
-        const targetHref = decodeURIComponent(flagParam);
-        // find the first matching row by comparing the original href in the
-        // parsed FOTD.html (no normalization) so we can extract title/link.
-        const matchRow = rows.find(row => {
-          const cells = row.querySelectorAll('td');
-          if (!cells.length) return false;
-          const mainLink = cells[1]?.querySelector('a');
-          if (!mainLink) return false;
-          return mainLink.getAttribute('href') === targetHref;
-        });
-
-        if (!matchRow) {
-          list.innerHTML = `<p>Flag not found.</p><p><a href="${location.pathname}">Back to list</a></p>`;
-          return;
-        }
-
-        const cells = matchRow.querySelectorAll('td');
-        const dayText = cells[0].textContent.trim();
-        const mainLinkEl = cells[1]?.querySelector('a');
-        const mainHref = mainLinkEl.getAttribute('href');
-        const titleText = mainLinkEl.textContent.trim();
-        const altLink = cells[2]?.querySelector('a');
-        const altHref = altLink?.getAttribute('href');
-
-        // Render detail UI
-        const container = document.createElement('div');
-        container.className = 'detail';
-        container.innerHTML = `
-          <div class="controls">
-            <button id="backBtn" class="btn">◀ Back</button>
-            <button id="editToggle" class="btn">Edit description</button>
-            <button id="saveBtn" class="btn" style="display:none">Save</button>
-            <button id="resetBtn" class="btn" style="display:none">Reset</button>
-          </div>
-          <main>
-            <h2 id="title"><a id="titleLink" href="#" target="_blank" rel="noopener"></a></h2>
-            <div><img id="flagImage" class="flag-large" alt="${escapeHtml(titleText)}"/></div>
-            <div class="desc">
-              <div id="descView"></div>
-              <textarea id="descEdit" class="edit-area" style="display:none"></textarea>
-              <div class="small">Title opens the source in a new tab. Your edits are saved locally to this browser (localStorage).</div>
-            </div>
-            <div style="margin-top:12px;" class="alt">${altHref ? 'Alt: <a href="' + escapeHtml(altHref) + '" target="_blank" rel="noopener">alt link</a>' : ''}</div>
-          </main>
-        `;
-
-        document.getElementById('list').appendChild(container);
-
-        const backBtn = document.getElementById('backBtn');
-        backBtn.addEventListener('click', () => {
-          if (history.length > 1) history.back();
-          else location.href = location.pathname; // fallback to the list
-        });
-
-        const titleLink = document.getElementById('titleLink');
-        titleLink.textContent = titleText;
-        // Keep the original mainHref as the external link target. If it's
-        // relative, make it absolute relative to the site root so the link
-        // opens correctly in a new tab.
-        try {
-          const resolved = new URL(mainHref, location.href).href;
-          titleLink.href = resolved;
-        } catch (e) {
-          titleLink.href = mainHref;
-        }
-
-        const flagImage = document.getElementById('flagImage');
-        const descView = document.getElementById('descView');
-        const descEdit = document.getElementById('descEdit');
-        const editToggle = document.getElementById('editToggle');
-        const saveBtn = document.getElementById('saveBtn');
-        const resetBtn = document.getElementById('resetBtn');
-
-        const STORAGE_KEY = 'fotd_descriptions_v1';
-        function getSaved() {
-          try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch (e) { return {}; }
-        }
-        function saveAll(obj) { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); }
-
-        // Use same batch resolution method as list view for consistency and reliability
-        (async function resolveImage() {
-          // direct image URL
-          try {
-            const u = new URL(mainHref, location.href);
-            if (/\.(png|jpe?g|gif|svg|webp)$/i.test(u.pathname)) {
-              flagImage.src = u.href;
-              return;
-            }
-          } catch (e) {
-            // continue to wiki resolution
-          }
-
-          const wikiMatch = mainHref.match(/\/wiki\/([^#?]+)/);
-          if (wikiMatch) {
-            let title = decodeURIComponent(wikiMatch[1]);
-            const url = new URL(mainHref, location.href);
-            const fileParam = url.searchParams.get('file');
-            if (fileParam) title = 'File:' + fileParam;
-            const isFile = /^File:/i.test(title);
-            const host = url.hostname;
-            let apiBase;
-            if (/wikimedia\.org$/.test(host) || /wikipedia\.org$/.test(host)) {
-              apiBase = `${url.protocol}//${host.replace(/^commons\.m\./, 'commons.')}/w/api.php`;
-            } else if (/fandom\.com$/.test(host)) {
-              apiBase = `${url.protocol}//${host}/api.php`;
-            } else {
-              apiBase = `${url.protocol}//${host}/w/api.php`;
-            }
-
-            // Use batch resolution with 800px width for detail view (same method as thumbnails)
-            const resolved = await batchResolveTitles(apiBase, [title], isFile, 800);
-            const imageUrl = resolved.get(title);
-            if (imageUrl) { flagImage.src = imageUrl; return; }
-
-            // commons fallback for File: links
-            if (isFile && !/wikimedia\.org$/.test(host)) {
-              const fb = await batchResolveTitles('https://commons.wikimedia.org/w/api.php', [title], true, 800);
-              const fbUrl = fb.get(title);
-              if (fbUrl) { flagImage.src = fbUrl; return; }
-            }
-          }
-
-          // give up — hide image element
-          flagImage.remove();
-        })();
-
-        // Description handling
-        const idKey = 'link:' + mainHref; // key namespace per-flag by original href
-        const all = getSaved();
-        const existing = all[idKey];
-        descView.textContent = existing || '';
-
-        function startEdit() {
-          descEdit.value = existing || '';
-          descView.style.display = 'none';
-          descEdit.style.display = 'block';
-          editToggle.style.display = 'none';
-          saveBtn.style.display = 'inline-block';
-          resetBtn.style.display = 'inline-block';
-        }
-        function stopEdit() {
-          descView.style.display = 'block';
-          descEdit.style.display = 'none';
-          editToggle.style.display = 'inline-block';
-          saveBtn.style.display = 'none';
-          resetBtn.style.display = 'none';
-        }
-
-        editToggle.addEventListener('click', () => startEdit());
-        saveBtn.addEventListener('click', () => {
-          const newText = descEdit.value.trim();
-          const a = getSaved();
-          if (newText) a[idKey] = newText; else delete a[idKey];
-          saveAll(a);
-          descView.textContent = newText || '';
-          stopEdit();
-        });
-        resetBtn.addEventListener('click', () => {
-          const a = getSaved();
-          delete a[idKey];
-          saveAll(a);
-          descView.textContent = '';
-          stopEdit();
-        });
-
-        return; // don't render the list when showing detail
-      }
-
       // First pass: render every row (with an empty thumbnail placeholder)
       // and classify its flag link so we know how to resolve it.
       const descriptors = []; // { thumbEl, mainHref }
@@ -370,11 +186,9 @@
         div.dataset.name = mainLink.textContent.toLowerCase();
         div.dataset.day = dayText.toLowerCase();
 
-        // Make the name navigate to THIS page with ?flag=<original-href>
-        // so it opens in the same tab and we can show a detail page.
         div.innerHTML = `
           <span class="day">${dayText.replace('Day ', '#')}</span>
-          <a href="?flag=${encodeURIComponent(mainHref)}">${mainLink.textContent}</a>
+          <a href="${mainHref}" target="_blank">${mainLink.textContent}</a>
           <img class="flag-thumb" alt="" loading="lazy" />
           ${altHref ? `<span class="alt">— <a href="${altHref}" target="_blank">alt</a></span>` : ''}
         `;
@@ -400,7 +214,7 @@
 
       for (const d of descriptors) {
         let url;
-        try { url = new URL(d.mainHref, location.href); } catch (e) { d.thumbEl.remove(); continue; }
+        try { url = new URL(d.mainHref); } catch (e) { d.thumbEl.remove(); continue; }
 
         // Google Drive share links don't need an API call at all.
         if (url.hostname.includes('drive.google.com')) {
@@ -508,16 +322,6 @@
         });
       });
     })();
-
-    // tiny helper to prevent injection when inserting into attributes/HTML
-    function escapeHtml(s) {
-      return String(s || '')
-        .replace(/&/g,'&amp;')
-        .replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;')
-        .replace(/'/g,'&#39;');
-    }
   </script>
 </body>
 </html>
